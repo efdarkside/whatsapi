@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const bodyParser = require('body-parser');
+const { JWT } = require('google-auth-library');
+const serviceAccount = require('./service-account.json'); // Arquivo baixado do Google Cloud
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -55,10 +57,18 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Função para chamar o Dialogflow
+// Função para chamar o Dialogflow (com autenticação via chave JSON)
 async function callDialogflow(message) {
+  const client = new JWT({
+    email: serviceAccount.client_email,
+    key: serviceAccount.private_key,
+    scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+  });
+
+  const token = await client.getAccessToken();
+
   const response = await axios.post(
-    `https://dialogflow.googleapis.com/v2/projects/${process.env.DIALOGFLOW_PROJECT_ID}/agent/sessions/123456:detectIntent`,
+    `https://dialogflow.googleapis.com/v2/projects/${serviceAccount.project_id}/agent/sessions/123456:detectIntent`,
     {
       queryInput: {
         text: {
@@ -69,7 +79,7 @@ async function callDialogflow(message) {
     },
     {
       headers: {
-        'Authorization': `Bearer ${process.env.DIALOGFLOW_ACCESS_TOKEN}`,
+        'Authorization': `Bearer ${token.token}`,
         'Content-Type': 'application/json',
       },
     }
