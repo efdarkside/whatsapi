@@ -1,93 +1,104 @@
-const axios = require("axios").default;
-const dialogflow = require("dialogflow");
+require('dotenv').config();
+const express = require('express');
+const bodyParser = require('body-parser');
+const axios = require('axios');
+const { SessionsClient } = require('@google-cloud/dialogflow');
 
-// Variables
-const projectId = "esan-spark-beta-ihai";
-const whatsAppToken = "EAAO5doIY8ncBO4nUuKjP3r7Ir3gbHGRmbO7svZAABuGxQmhl0nihZAbbkBUYY11gK7VrZBugDCsT9bJi7bpSH7BGzJZCQ2bkjTOTZBtGvZBYDIUIGPiivyZBSgK9mqY4FhEi6SEAz34cuQLcqKC1ZBjQGVCjd1gwolvf4MeMV5DTKlvgZCowPqbIAEoLjHlSqGBdhzwZDZD";
-const verifyToken = "segredosparkesan45";
+const app = express();
+app.use(bodyParser.json());
 
-// Dialogflow
-const sessionClient = new dialogflow.SessionsClient();
+// Configurações do Dialogflow
+const DIALOGFLOW_PROJECT_ID = process.env.DIALOGFLOW_PROJECT_ID;
+const sessionClient = new SessionsClient();
 
-exports.cloudAPI = async (req, res) => {
-  // VERIFICATION
-  let mode = req.query["hub.mode"];
-  let token = req.query["hub.verify_token"];
-  let challenge = req.query["hub.challenge"];
-  if (mode && token) {
-    if (mode === "subscribe" && token === verifyToken) {
-      res.status(200).send(challenge);
-    } else {
-      // Responds with '403 Forbidden' if verify tokens do not match
-      res.sendStatus(403);
-    }
-  }
+// Configurações do WhatsApp
+const WHATSAPP_API_URL = 'https://graph.facebook.com/v13.0/me/messages';
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 
-  // RESPONSE
-  if (req.body.object) {
-    if (
-      req.body.entry &&
-      req.body.entry[0].changes &&
-      req.body.entry[0].changes[0] &&
-      req.body.entry[0].changes[0].value.messages &&
-      req.body.entry[0].changes[0].value.messages[0]
-    ) {
-      // Get Variables
-      let to = req.body.entry[0].changes[0].value.metadata.phone_number_id;
-      let from = req.body.entry[0].changes[0].value.messages[0].from; // extract the phone number from the webhook payload
-      let msg_body = req.body.entry[0].changes[0].value.messages[0].text.body; // extract the message text from the webhook payload
-
-      // Define Dialogflow Session
-      const sessionPath = sessionClient.sessionPath(projectId, from);
-      const request = {
-        session: sessionPath,
-        queryInput: {
-          text: {
-            text: msg_body,
-            languageCode: "pt-BR",
-          },
+// Função para enviar mensagem ao WhatsApp
+async function sendWhatsAppMessage(phoneNumber, message) {
+  try {
+    const response = await axios.post(
+      WHATSAPP_API_URL,
+      {
+        messaging_product: 'whatsapp',
+        to: phoneNumber,
+        text: { body: message },
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+          'Content-Type': 'application/json',
         },
-      };
-
-      // Get Dialogflow Responses
-      try {
-        const fulfillmentMessages = (
-          await sessionClient.detectIntent(request)
-        )[0].queryResult.fulfillmentMessages;
-        for (const response of fulfillmentMessages) {
-          let responseMsg = "";
-          if (response.text) {
-            for (const text of response.text.text) {
-              responseMsg = `${responseMsg}${text}\n`;
-            }
-          }
-          await sendMessage(to, from, responseMsg);
-        }
-      } catch (e) {
-        console.log(e);
-        res.sendStatus(403);
       }
-      res.sendStatus(200);
-    }
-  } else {
-    // Return a '404 Not Found' if event is not from a WhatsApp API
-    res.sendStatus(404);
+    );
+    return response.data;
+  } catch (error) {
+    console.error('Erro ao enviar mensagem pelo WhatsApp:', error.response?.data || error.message);
+    throw error;
   }
-};
+}
 
-const sendMessage = async (to, from, msg_body) => {
-  await axios({
-    method: "POST", // Required, HTTP method, a string, e.g. POST, GET
-    url:
-      "https://graph.facebook.com/v12.0/" +
-      to +
-      "/messages?access_token=" +
-      whatsAppToken,
-    data: {
-      messaging_product: "whatsapp",
-      to: from,
-      text: { body: msg_body },
+// Função para detectar intenção no Dialogflow
+async function detectIntent(text, sessionId) {
+  const sessionPath = sessionClient.projectAgentSessionPath(DIALOGFLOW_PROJECT_ID, sessionId);
+  const request = {
+    session: sessionPath,
+    queryInput: {
+      text: {
+        text: text,
+        languageCode: 'pt-BR',
+      },
     },
-    headers: { "Content-Type": "application/json" },
-  });
-};
+  };
+
+  try {
+    const [response] = await sessionClient.detectIntent(request);
+    return response.queryResult.fulfillmentText;
+  } catch (error) {
+    console.error('Erro ao detectar intenção no Dialogflow:', error.message);
+    throw error;
+  }
+}
+
+// Rota para receber mensagens do WhatsApp (webhook)
+app.post('/webhook', async (req, res) => {
+  try {
+    const entry = req.body.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const message = changes?.value?.messages?.[0];
+
+    if (!message) {
+      return res.status(400).json({ error: 'Mensagem inválida' });
+    }
+
+    const phoneNumber = message.from;
+    const messageText = message.text?.body;
+
+    if (!messageText) {
+      return res.status(400).json({ error: 'Mensagem sem texto' });
+    }
+
+    // Envia a mensagem para o Dialogflow
+    const dialogflowResponse = await detectIntent(messageText, 'session-' + phoneNumber);
+
+    // Envia a resposta de volta para o WhatsApp
+    await sendWhatsAppMessage(phoneNumber, dialogflowResponse);
+
+    res.status(200).json({ status: 'success' });
+  } catch (error) {
+    console.error('Erro no webhook:', error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+// Rota de teste
+app.get('/', (req, res) => {
+  res.send('API WhatsApp + Dialogflow está funcionando!');
+});
+
+// Inicia o servidor
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Servidor rodando na porta ${PORT}`);
+});
