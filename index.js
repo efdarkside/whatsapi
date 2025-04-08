@@ -1,30 +1,74 @@
+require('dotenv').config(); // Carrega variáveis de ambiente (.env)
 const express = require('express');
-const bodyParser = require('body-parser');
 const axios = require('axios');
+const bodyParser = require('body-parser');
 
 const app = express();
-app.use(bodyParser.json());
+const PORT = process.env.PORT || 3000;
 
-// Rota para o webhook do Dialogflow
+// Configurações do Express
+app.use(bodyParser.json()); // Para receber JSON no corpo das requisições
+
+// Rota para receber mensagens do WhatsApp Business API
 app.post('/webhook', async (req, res) => {
-  const intent = req.body.queryResult.intent.displayName;
-  const userMessage = req.body.queryResult.queryText;
-  const phoneNumber = req.body.session.split('/').pop(); // Extrai o número do WhatsApp
+  try {
+    const { message, sender } = req.body; // Supondo que o WhatsApp envia esses dados
 
-  console.log(`Mensagem recebida de ${phoneNumber}: ${userMessage} (Intent: ${intent})`);
+    // 1. Envia a mensagem para o Dialogflow
+    const dialogflowResponse = await callDialogflow(message);
 
-  // Simulação de envio para WhatsApp (substitua pela sua API real)
-  const whatsappResponse = await sendToWhatsApp(phoneNumber, `Você disse: "${userMessage}". Intent detectada: ${intent}`);
-  
-  res.json({ fulfillmentText: `Mensagem enviada para WhatsApp: ${whatappResponse}` });
+    // 2. Envia a resposta do Dialogflow de volta para o WhatsApp
+    await sendToWhatsApp(sender, dialogflowResponse);
+
+    res.status(200).send('OK');
+  } catch (error) {
+    console.error('Erro no webhook:', error);
+    res.status(500).send('Erro interno');
+  }
 });
 
-// Função simulada para enviar para a API do WhatsApp
-async function sendToWhatsApp(phoneNumber, message) {
-  // Substitua por sua lógica real (Twilio, WPP Cloud API, etc.)
-  console.log(`Enviando para WhatsApp (${phoneNumber}): ${message}`);
-  return "OK";
+// Função para chamar o Dialogflow
+async function callDialogflow(message) {
+  const response = await axios.post(
+    `https://dialogflow.googleapis.com/v2/projects/${process.env.DIALOGFLOW_PROJECT_ID}/agent/sessions/123456:detectIntent`,
+    {
+      queryInput: {
+        text: {
+          text: message,
+          languageCode: 'pt-BR',
+        },
+      },
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${process.env.DIALOGFLOW_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  return response.data.queryResult.fulfillmentText;
 }
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
+// Função para enviar mensagem de volta ao WhatsApp
+async function sendToWhatsApp(recipient, message) {
+  await axios.post(
+    `https://graph.facebook.com/v18.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: 'whatsapp',
+      to: recipient,
+      text: { body: message },
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+}
+
+// Inicia o servidor
+app.listen(PORT, () => {
+  console.log(`Servidor rodando na porta ${PORT}`);
+});
