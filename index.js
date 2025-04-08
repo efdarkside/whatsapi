@@ -7,28 +7,15 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // =============================================
-// CONFIGURAÇÃO DE MONITORAMENTO DE TOKEN
+// 1. CONFIGURAÇÃO INICIAL
 // =============================================
+
+// Monitoramento de token do WhatsApp
 const TOKEN_EXPIRATION = process.env.WHATSAPP_TOKEN_EXPIRATION 
   ? new Date(process.env.WHATSAPP_TOKEN_EXPIRATION) 
   : null;
 
-// Verificador diário de expiração
-setInterval(() => {
-  if (TOKEN_EXPIRATION && new Date() > TOKEN_EXPIRATION) {
-    console.error('⏰ ALERTA CRÍTICO: Token do WhatsApp expirou!');
-    // Adicione aqui notificações (email, Slack, etc)
-  } else if (TOKEN_EXPIRATION) {
-    const daysLeft = Math.floor((TOKEN_EXPIRATION - new Date()) / (1000 * 60 * 60 * 24));
-    if (daysLeft < 7) {
-      console.warn(`⚠️ Token expira em ${daysLeft} dias`);
-    }
-  }
-}, 24 * 60 * 60 * 1000); // Verifica a cada 24h
-
-// =============================================
-// CONFIGURAÇÃO DO DIALOGFLOW (MESMO CÓDIGO ANTERIOR)
-// =============================================
+// Configuração do Dialogflow
 const dialogflowClient = new SessionsClient({
   projectId: process.env.DIALOGFLOW_PROJECT_ID,
   credentials: {
@@ -38,13 +25,29 @@ const dialogflowClient = new SessionsClient({
 });
 
 // =============================================
-// FUNÇÃO ATUALIZADA PARA ENVIO NO WHATSAPP
+// 2. MIDDLEWARES
 // =============================================
+
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString();
+  }
+}));
+
+// Middleware para log de requisições
+app.use((req, res, next) => {
+  console.log(`📥 ${req.method} ${req.path}`);
+  next();
+});
+
+// =============================================
+// 3. FUNÇÕES PRINCIPAIS (ATUALIZADAS)
+// =============================================
+
 async function sendWhatsAppMessage(recipient, message) {
   const url = `https://graph.facebook.com/v18.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`;
   
   try {
-    const startTime = Date.now();
     const response = await axios.post(url, {
       messaging_product: 'whatsapp',
       recipient_type: 'individual',
@@ -59,69 +62,17 @@ async function sendWhatsAppMessage(recipient, message) {
       timeout: 10000
     });
 
-    console.log(`📤 Mensagem enviada em ${Date.now() - startTime}ms`);
     return response.data;
 
   } catch (error) {
-    // Tratamento específico para token expirado
     if (error.response?.data?.error?.code === 190) {
-      const errorData = error.response.data.error;
-      console.error('🔴 ERRO DE TOKEN EXPIRADO:', {
-        message: errorData.message,
-        expiry: errorData.error_data?.expiry_date,
-        fbtrace_id: errorData.fbtrace_id
-      });
-      
-      throw new Error('TOKEN_EXPIRED'); // Erro especial para identificar o caso
+      console.error('🔴 TOKEN EXPIRADO:', error.response.data.error);
+      throw new Error('TOKEN_EXPIRED');
     }
-
-    // Outros erros
-    console.error('🔴 ERRO NO WHATSAPP:', {
-      status: error.response?.status,
-      error: error.response?.data?.error || error.message,
-      recipient,
-      messagePreview: message?.substring(0, 50)
-    });
     throw error;
   }
 }
 
-// =============================================
-// ROTAS ATUALIZADAS COM TRATAMENTO DE TOKEN EXPIRADO
-// =============================================
-app.post('/webhook', async (req, res) => {
-  try {
-    const { entry } = req.body;
-    const [firstEntry] = entry || [];
-    const message = firstEntry?.changes?.[0]?.value?.messages?.[0];
-
-    if (!message) return res.sendStatus(200);
-
-    const dialogflowResponse = await detectIntent(message.from, message.text?.body);
-    
-    try {
-      await sendWhatsAppMessage(message.from, dialogflowResponse);
-      res.status(200).json({ status: 'success' });
-    } catch (sendError) {
-      if (sendError.message === 'TOKEN_EXPIRED') {
-        res.status(401).json({ 
-          error: 'token_expired',
-          message: 'O token do WhatsApp precisa ser renovado'
-        });
-      } else {
-        throw sendError;
-      }
-    }
-
-  } catch (error) {
-    console.error('🔥 ERRO NO PROCESSAMENTO:', error.stack);
-    res.status(500).json({ error: 'internal_error' });
-  }
-});
-
-// =============================================
-// DETECÇÃO DE INTENÇÃO (MESMA IMPLEMENTAÇÃO)
-// =============================================
 async function detectIntent(sessionId, messageText) {
   const sessionPath = dialogflowClient.projectAgentSessionPath(
     process.env.DIALOGFLOW_PROJECT_ID,
@@ -142,18 +93,87 @@ async function detectIntent(sessionId, messageText) {
 }
 
 // =============================================
-// INICIALIZAÇÃO COM VERIFICAÇÃO DE CONFIGURAÇÃO
+// 4. ROTAS COM TRATAMENTO DE ERROS COMPLETO
 // =============================================
+
+app.get('/webhook', (req, res) => {
+  const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
+
+  if (mode === 'subscribe' && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+
+  res.sendStatus(403);
+});
+
+app.post('/webhook', async (req, res) => {
+  try {
+    // Verificação robusta do corpo da requisição
+    if (!req.body || typeof req.body !== 'object') {
+      console.error('❌ Corpo da requisição inválido:', req.rawBody);
+      return res.status(400).json({ error: 'Invalid request body' });
+    }
+
+    const entry = req.body.entry?.[0];
+    if (!entry) {
+      console.log('⚠️ Entrada vazia recebida');
+      return res.status(200).json({ status: 'ignored' });
+    }
+
+    const change = entry.changes?.[0];
+    const message = change?.value?.messages?.[0];
+
+    if (!message) {
+      console.log('📭 Nenhuma mensagem válida encontrada');
+      return res.status(200).json({ status: 'no_message' });
+    }
+
+    console.log(`📩 Mensagem recebida de ${message.from}: ${message.text?.body || '(sem texto)'}`);
+
+    const dialogflowResponse = await detectIntent(message.from, message.text?.body || '');
+    await sendWhatsAppMessage(message.from, dialogflowResponse);
+
+    res.status(200).json({ status: 'success' });
+
+  } catch (error) {
+    console.error('🔥 ERRO:', {
+      error: error.message,
+      stack: error.stack,
+      body: req.rawBody
+    });
+
+    if (error.message === 'TOKEN_EXPIRED') {
+      return res.status(401).json({ error: 'token_expired' });
+    }
+
+    res.status(500).json({ error: 'internal_error' });
+  }
+});
+
+// =============================================
+// 5. INICIALIZAÇÃO E MONITORAMENTO
+// =============================================
+
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
-  
-  // Verificações iniciais
-  if (!process.env.WHATSAPP_ACCESS_TOKEN) {
-    console.error('❌ WHATSAPP_ACCESS_TOKEN não definido');
-  }
-  
-  if (TOKEN_EXPIRATION) {
-    const daysLeft = Math.floor((TOKEN_EXPIRATION - new Date()) / (1000 * 60 * 60 * 24));
-    console.log(`ℹ️ Token do WhatsApp expira em: ${daysLeft} dias`);
-  }
+  console.log(`
+  🚀 Servidor rodando na porta ${PORT}
+  ⏰ Token expira em: ${TOKEN_EXPIRATION || 'data não configurada'}
+  `);
+
+  // Verificação diária do token
+  setInterval(() => {
+    if (TOKEN_EXPIRATION && new Date() > TOKEN_EXPIRATION) {
+      console.error('⏰ ALERTA: Token do WhatsApp expirou!');
+    }
+  }, 24 * 60 * 60 * 1000);
+});
+
+// Tratamento de erros não capturados
+process.on('unhandledRejection', (reason) => {
+  console.error('💥 Rejeição não tratada:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('💣 Exceção não capturada:', error);
+  process.exit(1);
 });
