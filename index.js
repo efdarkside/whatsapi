@@ -3,7 +3,7 @@ const express = require('express');
 const axios = require('axios');
 const bodyParser = require('body-parser');
 const { JWT } = require('google-auth-library');
-const serviceAccount = require('./service-account.json'); // Arquivo baixado do Google Cloud
+const serviceAccount = require('./esan-spark-beta-ihai-165e13ebe362.json'); // Arquivo baixado do Google Cloud
 
 const app = express();
 const PORT = process.env.PORT || 3000;
