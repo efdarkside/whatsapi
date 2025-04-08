@@ -10,11 +10,6 @@ const PORT = process.env.PORT || 3000;
 // 1. CONFIGURAÇÃO INICIAL
 // =============================================
 
-// Monitoramento de token do WhatsApp
-const TOKEN_EXPIRATION = process.env.WHATSAPP_TOKEN_EXPIRATION 
-  ? new Date(process.env.WHATSAPP_TOKEN_EXPIRATION) 
-  : null;
-
 // Configuração do Dialogflow
 const dialogflowClient = new SessionsClient({
   projectId: process.env.DIALOGFLOW_PROJECT_ID,
@@ -34,27 +29,28 @@ app.use(express.json({
   }
 }));
 
-// Middleware para log de requisições
-app.use((req, res, next) => {
-  console.log(`📥 ${req.method} ${req.path}`);
-  next();
-});
-
 // =============================================
-// 3. FUNÇÕES PRINCIPAIS (ATUALIZADAS)
+// 3. FUNÇÃO DE ENVIO PARA WHATSAPP (CORRIGIDA)
 // =============================================
 
 async function sendWhatsAppMessage(recipient, message) {
   const url = `https://graph.facebook.com/v18.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`;
   
   try {
-    const response = await axios.post(url, {
+    const payload = {
       messaging_product: 'whatsapp',
       recipient_type: 'individual',
       to: recipient,
       type: 'text',
-      text: { body: message }
-    }, {
+      text: { 
+        body: message,
+        preview_url: false // Adicionado para evitar erros 400
+      }
+    };
+
+    console.log('📤 Enviando para WhatsApp:', JSON.stringify(payload, null, 2));
+
+    const response = await axios.post(url, payload, {
       headers: {
         'Authorization': `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
         'Content-Type': 'application/json',
@@ -62,16 +58,61 @@ async function sendWhatsAppMessage(recipient, message) {
       timeout: 10000
     });
 
+    console.log('✅ Resposta do WhatsApp:', response.data);
     return response.data;
 
   } catch (error) {
-    if (error.response?.data?.error?.code === 190) {
-      console.error('🔴 TOKEN EXPIRADO:', error.response.data.error);
-      throw new Error('TOKEN_EXPIRED');
-    }
+    console.error('🔴 ERRO NA API DO WHATSAPP:', {
+      status: error.response?.status,
+      data: error.response?.data,
+      config: {
+        url: error.config?.url,
+        data: error.config?.data
+      }
+    });
     throw error;
   }
 }
+
+// =============================================
+// 4. ROTA DO WEBHOOK (ATUALIZADA)
+// =============================================
+
+app.post('/webhook', async (req, res) => {
+  try {
+    // Verificação robusta do payload
+    if (!req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
+      console.log('📭 Payload inválido:', req.rawBody);
+      return res.status(200).end(); // Sempre retorne 200 para o WhatsApp
+    }
+
+    const message = req.body.entry[0].changes[0].value.messages[0];
+    const sender = message.from;
+    const messageText = message.text?.body;
+
+    console.log(`📩 Mensagem recebida de ${sender}: ${messageText}`);
+
+    // Processa no Dialogflow
+    const dialogflowResponse = await detectIntent(sender, messageText || '');
+
+    // Envia resposta
+    await sendWhatsAppMessage(sender, dialogflowResponse);
+
+    res.status(200).end();
+
+  } catch (error) {
+    console.error('🔥 ERRO NO PROCESSAMENTO:', {
+      error: error.message,
+      stack: error.stack,
+      rawBody: req.rawBody
+    });
+    res.status(500).end();
+  }
+});
+
+// =============================================
+// 5. OUTRAS FUNÇÕES (MANTIDAS)
+// =============================================
 
 async function detectIntent(sessionId, messageText) {
   const sessionPath = dialogflowClient.projectAgentSessionPath(
@@ -93,87 +134,9 @@ async function detectIntent(sessionId, messageText) {
 }
 
 // =============================================
-// 4. ROTAS COM TRATAMENTO DE ERROS COMPLETO
-// =============================================
-
-app.get('/webhook', (req, res) => {
-  const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
-
-  if (mode === 'subscribe' && token === process.env.WHATSAPP_VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
-  }
-
-  res.sendStatus(403);
-});
-
-app.post('/webhook', async (req, res) => {
-  try {
-    // Verificação robusta do corpo da requisição
-    if (!req.body || typeof req.body !== 'object') {
-      console.error('❌ Corpo da requisição inválido:', req.rawBody);
-      return res.status(400).json({ error: 'Invalid request body' });
-    }
-
-    const entry = req.body.entry?.[0];
-    if (!entry) {
-      console.log('⚠️ Entrada vazia recebida');
-      return res.status(200).json({ status: 'ignored' });
-    }
-
-    const change = entry.changes?.[0];
-    const message = change?.value?.messages?.[0];
-
-    if (!message) {
-      console.log('📭 Nenhuma mensagem válida encontrada');
-      return res.status(200).json({ status: 'no_message' });
-    }
-
-    console.log(`📩 Mensagem recebida de ${message.from}: ${message.text?.body || '(sem texto)'}`);
-
-    const dialogflowResponse = await detectIntent(message.from, message.text?.body || '');
-    await sendWhatsAppMessage(message.from, dialogflowResponse);
-
-    res.status(200).json({ status: 'success' });
-
-  } catch (error) {
-    console.error('🔥 ERRO:', {
-      error: error.message,
-      stack: error.stack,
-      body: req.rawBody
-    });
-
-    if (error.message === 'TOKEN_EXPIRED') {
-      return res.status(401).json({ error: 'token_expired' });
-    }
-
-    res.status(500).json({ error: 'internal_error' });
-  }
-});
-
-// =============================================
-// 5. INICIALIZAÇÃO E MONITORAMENTO
+// 6. INICIALIZAÇÃO
 // =============================================
 
 app.listen(PORT, () => {
-  console.log(`
-  🚀 Servidor rodando na porta ${PORT}
-  ⏰ Token expira em: ${TOKEN_EXPIRATION || 'data não configurada'}
-  `);
-
-  // Verificação diária do token
-  setInterval(() => {
-    if (TOKEN_EXPIRATION && new Date() > TOKEN_EXPIRATION) {
-      console.error('⏰ ALERTA: Token do WhatsApp expirou!');
-    }
-  }, 24 * 60 * 60 * 1000);
-});
-
-// Tratamento de erros não capturados
-process.on('unhandledRejection', (reason) => {
-  console.error('💥 Rejeição não tratada:', reason);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('💣 Exceção não capturada:', error);
-  process.exit(1);
+  console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
