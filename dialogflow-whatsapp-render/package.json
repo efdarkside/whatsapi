@@ -1,7 +1,7 @@
 {
   "name": "dialogflow-whatsapp-bot",
   "version": "1.0.0",
-  "main": "index.js",  // Arquivo principal
+  "main": "dialogflow-whatsapp-render/index.js",  // Arquivo principal
   "scripts": {
     "start": "node index.js",  // Comando de inicialização
     "test": "echo \"Error: no test specified\" && exit 1"
