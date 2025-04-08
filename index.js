@@ -1,4 +1,4 @@
-require('dotenv').config(); // Carrega variáveis de ambiente (.env)
+require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const bodyParser = require('body-parser');
@@ -6,19 +6,47 @@ const bodyParser = require('body-parser');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Configurações do Express
-app.use(bodyParser.json()); // Para receber JSON no corpo das requisições
+// Middlewares
+app.use(bodyParser.json());
 
-// Rota para receber mensagens do WhatsApp Business API
+// Rota para verificação do webhook (Meta valida essa URL)
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+    console.log('Webhook verificado com sucesso!');
+    res.status(200).send(challenge);
+  } else {
+    console.error('Falha na verificação do webhook: token inválido');
+    res.sendStatus(403);
+  }
+});
+
+// Rota para receber mensagens do WhatsApp
 app.post('/webhook', async (req, res) => {
   try {
-    const { message, sender } = req.body; // Supondo que o WhatsApp envia esses dados
+    console.log('Recebido payload do WhatsApp:', JSON.stringify(req.body, null, 2));
+
+    // Extrai dados da mensagem (estrutura do payload do WhatsApp)
+    const entry = req.body.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const message = changes?.value?.messages?.[0];
+    
+    if (!message) {
+      console.log('Nenhuma mensagem válida encontrada no payload');
+      return res.sendStatus(200); // Responde 200 para evitar retries
+    }
+
+    const senderPhone = message.from; // Número do remetente
+    const messageText = message.text?.body; // Texto da mensagem
 
     // 1. Envia a mensagem para o Dialogflow
-    const dialogflowResponse = await callDialogflow(message);
+    const dialogflowResponse = await callDialogflow(messageText);
 
     // 2. Envia a resposta do Dialogflow de volta para o WhatsApp
-    await sendToWhatsApp(sender, dialogflowResponse);
+    await sendToWhatsApp(senderPhone, dialogflowResponse);
 
     res.status(200).send('OK');
   } catch (error) {
@@ -50,7 +78,7 @@ async function callDialogflow(message) {
   return response.data.queryResult.fulfillmentText;
 }
 
-// Função para enviar mensagem de volta ao WhatsApp
+// Função para enviar mensagem ao WhatsApp
 async function sendToWhatsApp(recipient, message) {
   await axios.post(
     `https://graph.facebook.com/v18.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
@@ -71,20 +99,4 @@ async function sendToWhatsApp(recipient, message) {
 // Inicia o servidor
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
-}
-           
-// Rota para verificação do webhook (Meta valida essa URL)
-app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  // Verifica se o token bate com o seu "Verify Token"
-  if (mode === 'subscribe' && token === process.env.WHATSAPP_ACCESS_TOKEN) {
-    console.log('Webhook verificado!');
-    res.status(200).send(challenge);
-  } else {
-    console.error('Falha na verificação do webhook');
-    res.sendStatus(403);
-  }
 });
