@@ -80,7 +80,7 @@ app.get('/webhook', (req, res) => {
   const challenge = req.query['hub.challenge'];
 
   // Verifica se o token bate com o seu "Verify Token"
-  if (mode === 'subscribe' && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+  if (mode === 'subscribe' && token === process.env.WHATSAPP_ACCESS_TOKEN) {
     console.log('Webhook verificado!');
     res.status(200).send(challenge);
   } else {
