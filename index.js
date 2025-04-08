@@ -71,4 +71,20 @@ async function sendToWhatsApp(recipient, message) {
 // Inicia o servidor
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
+}
+           
+// Rota para verificação do webhook (Meta valida essa URL)
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  // Verifica se o token bate com o seu "Verify Token"
+  if (mode === 'subscribe' && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+    console.log('Webhook verificado!');
+    res.status(200).send(challenge);
+  } else {
+    console.error('Falha na verificação do webhook');
+    res.sendStatus(403);
+  }
 });
