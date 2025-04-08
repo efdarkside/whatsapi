@@ -1,31 +1,49 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
-const bodyParser = require('body-parser');
 const { SessionsClient } = require('@google-cloud/dialogflow');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // =============================================
-// CONFIGURAÇÃO SEGURA DO DIALOGFLOW (Render.com)
+// CONFIGURAÇÃO SEGURA DO DIALOGFLOW (2024)
 // =============================================
-const dialogflowClient = new SessionsClient({
-  projectId: process.env.DIALOGFLOW_PROJECT_ID,
-  credentials: {
-    client_email: process.env.GOOGLE_CLIENT_EMAIL,
-    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n') // Converte \n para quebras reais
+const getDialogflowClient = () => {
+  try {
+    // Validação rigorosa das variáveis
+    if (!process.env.DIALOGFLOW_PROJECT_ID) {
+      throw new Error('DIALOGFLOW_PROJECT_ID não definido');
+    }
+
+    if (!process.env.GOOGLE_CLIENT_EMAIL || !process.env.GOOGLE_PRIVATE_KEY) {
+      throw new Error('Credenciais do Google incompletas');
+    }
+
+    // Configuração recomendada pelo Google (2024)
+    return new SessionsClient({
+      projectId: process.env.DIALOGFLOW_PROJECT_ID,
+      credentials: {
+        client_email: process.env.GOOGLE_CLIENT_EMAIL,
+        private_key: process.env.GOOGLE_PRIVATE_KEY,
+      },
+      apiEndpoint: 'dialogflow.googleapis.com',
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+    });
+  } catch (error) {
+    console.error('❌ Configuração do Dialogflow falhou:', error.message);
+    process.exit(1);
   }
-});
+};
+
+const dialogflowClient = getDialogflowClient();
 
 // Middlewares
-app.use(bodyParser.json());
+app.use(express.json());
 
 // ======================
-// ROTAS DO WEBHOOK
+// ROTAS DO WEBHOOK (2024)
 // ======================
-
-// Verificação do Webhook (Meta)
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -33,71 +51,78 @@ app.get('/webhook', (req, res) => {
 
   if (mode === 'subscribe' && token === process.env.WHATSAPP_VERIFY_TOKEN) {
     console.log('✅ Webhook verificado');
-    res.status(200).send(challenge);
-  } else {
-    console.error('❌ Token de verificação inválido');
-    res.sendStatus(403);
+    return res.status(200).send(challenge);
   }
+
+  console.error('❌ Falha na verificação');
+  res.sendStatus(403);
 });
 
-// Recebimento de mensagens
 app.post('/webhook', async (req, res) => {
   try {
-    console.log('📩 Payload recebido:', JSON.stringify(req.body, null, 2));
-
-    const entry = req.body.entry?.[0];
-    const message = entry?.changes?.[0]?.value?.messages?.[0];
+    // Extração segura dos dados (com operador optional chaining)
+    const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     
     if (!message) {
-      console.log('⚠️ Mensagem não reconhecida');
+      console.log('⚠️ Payload inválido');
       return res.sendStatus(200);
     }
 
-    const response = await processMessage(message.from, message.text?.body);
-    res.status(200).json({ status: 'success', response });
+    // Processamento assíncrono
+    await processWhatsAppMessage(message);
+    res.status(200).json({ status: 'success' });
 
   } catch (error) {
-    console.error('🔥 Erro crítico:', error.stack);
+    console.error('🔥 Erro no webhook:', {
+      error: error.message,
+      stack: error.stack,
+      body: req.body
+    });
     res.status(500).json({ error: 'Erro interno' });
   }
 });
 
 // ======================
-// FUNÇÕES PRINCIPAIS
+// FUNÇÕES PRINCIPAIS (2024)
 // ======================
-
-// Processa mensagem (WhatsApp → Dialogflow → WhatsApp)
-async function processMessage(sender, message) {
+async function processWhatsAppMessage(message) {
   try {
-    // 1. Consulta ao Dialogflow
-    const dialogflowResponse = await callDialogflow(message, sender);
-    
+    // 1. Processa a mensagem no Dialogflow
+    const dialogflowResponse = await detectIntent(
+      message.from, // Usa o número como sessionId
+      message.text?.body
+    );
+
     // 2. Envia resposta para WhatsApp
-    await sendToWhatsApp(sender, dialogflowResponse);
-    
-    return { dialogflow: dialogflowResponse };
+    await sendWhatsAppReply(
+      message.from,
+      dialogflowResponse
+    );
 
   } catch (error) {
-    console.error('Erro no processamento:', error.stack);
+    console.error('🔴 Erro no processamento:', {
+      messageId: message.id,
+      error: error.message
+    });
     throw error;
   }
 }
 
-// Consulta segura ao Dialogflow
-async function callDialogflow(message, sessionId) {
+async function detectIntent(sessionId, messageText) {
   try {
-    console.log('🔑 Credenciais carregadas para o projeto:', process.env.DIALOGFLOW_PROJECT_ID);
-
+    // Cria session path com o novo formato (2024)
     const sessionPath = dialogflowClient.projectAgentSessionPath(
       process.env.DIALOGFLOW_PROJECT_ID,
       sessionId
     );
 
+    console.log('🔍 Detectando intenção para sessão:', sessionPath);
+
     const [response] = await dialogflowClient.detectIntent({
       session: sessionPath,
       queryInput: {
         text: {
-          text: message,
+          text: messageText,
           languageCode: 'pt-BR',
         },
       },
@@ -107,20 +132,21 @@ async function callDialogflow(message, sessionId) {
 
   } catch (error) {
     console.error('🔴 ERRO NO DIALOGFLOW:', {
-      message: error.message,
-      details: error.response?.data || 'Sem detalhes adicionais'
+      projectId: process.env.DIALOGFLOW_PROJECT_ID,
+      errorDetails: error.response?.data || error.message,
+      errorCode: error.code
     });
-    throw new Error('Falha na consulta ao Dialogflow');
+    throw new Error('Falha ao detectar intenção');
   }
 }
 
-// Envia mensagem para WhatsApp
-async function sendToWhatsApp(recipient, message) {
+async function sendWhatsAppReply(recipient, message) {
   try {
-    await axios.post(
+    const response = await axios.post(
       `https://graph.facebook.com/v18.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: 'whatsapp',
+        recipient_type: 'individual',
         to: recipient,
         type: 'text',
         text: { body: message }
@@ -130,19 +156,35 @@ async function sendToWhatsApp(recipient, message) {
           'Authorization': `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
           'Content-Type': 'application/json',
         },
+        timeout: 5000 // Timeout de 5 segundos
       }
     );
+
+    console.log('📤 Mensagem enviada:', response.data);
+
   } catch (error) {
-    console.error('🔴 ERRO NO WHATSAPP:', error.response?.data || error.message);
+    console.error('🔴 ERRO NO WHATSAPP:', {
+      status: error.response?.status,
+      data: error.response?.data,
+      message: error.message
+    });
     throw error;
   }
 }
 
 // ======================
-// INICIALIZAÇÃO
+// INICIALIZAÇÃO (2024)
 // ======================
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
-  console.log(`🔗 Dialogflow Project ID: ${process.env.DIALOGFLOW_PROJECT_ID}`);
-  console.log(`🔗 WhatsApp Number ID: ${process.env.WHATSAPP_PHONE_NUMBER_ID}`);
+  console.log(`
+  🚀 Servidor iniciado na porta ${PORT}
+  📌 Configurações carregadas:
+     - Projeto Dialogflow: ${process.env.DIALOGFLOW_PROJECT_ID}
+     - Número WhatsApp: ${process.env.WHATSAPP_PHONE_NUMBER_ID}
+  `);
+});
+
+// Tratamento de erros não capturados
+process.on('unhandledRejection', (error) => {
+  console.error('💥 Erro não tratado:', error);
 });
